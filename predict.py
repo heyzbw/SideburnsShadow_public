@@ -1,14 +1,17 @@
+import os.path
 import sys
 import tempfile
 from argparse import Namespace
-# 测试
+
 import dlib
 import torch
 import torchvision
 from torchvision import transforms
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from cog import BasePredictor, Path, Input
+# from cog import BasePredictor, Path, Input
+from mapper.options.predict_options import  PredictOptions
+
 
 sys.path.insert(0, "encoder4editing")
 from models.psp import pSp
@@ -20,15 +23,18 @@ from mapper.datasets.latents_dataset_inference import LatentsDatasetInference
 from mapper.hairclip_mapper import HairCLIPMapper
 
 
-with open("mapper/hairstyle_list.txt") as infile:
+with open("hairstyle_list.txt") as infile:
     HAIRSTYLE_LIST = sorted([line.rstrip() for line in infile])
 
 
-class Predictor(BasePredictor):
-    def setup(self):
+# class Predictor(BasePredictor):
+class Predictor:
+    # def setup(self):
+    def __init__(self):
         self.device = "cuda:0"
-
+        # self.opts = opts
         # use e4e to get latent code for an input image
+        # e4e_model_path = "pretrained_models/e4e_ffhq_encode.pt"
         e4e_model_path = "pretrained_models/e4e_ffhq_encode.pt"
         e4e_ckpt = torch.load(e4e_model_path, map_location="cpu")
         e4e_opts = e4e_ckpt["opts"]
@@ -52,33 +58,15 @@ class Predictor(BasePredictor):
         checkpoint_path = "pretrained_models/hairclip.pt"
         self.ckpt = torch.load(checkpoint_path, map_location="cpu")
 
-    def predict(
-        self,
-        image: Path = Input(
-            description="Input image. Image will be aligned and resized. Output will be the "
-            "concatenation of the inverted input and the image with edited hair."
-        ),
-        editing_type: str = Input(
-            choices=["hairstyle", "color", "both"],
-            default="hairstyle",
-            description="Edit hairstyle or color or both.",
-        ),
-        hairstyle_description: str = Input(
-            choices=HAIRSTYLE_LIST,
-            default=None,
-            description="Hairstyle text prompt. "
-            "Valid if input_type is text or text_image.",
-        ),
-        color_description: str = Input(
-            default=None,
-            description="Color text prompt, eg: purple, red, orange. "
-            "Valid if editing_type is color or both.",
-        ),
-    ) -> Path:
-
-        editing_type_ = str(editing_type).split(".")[-1]
-        hairstyle_description_ = str(hairstyle_description).split(".")[-1]
-
+        
+    def predict(self, image, editing_type, hairstyle_description, color_description):
+       
+    
+        editing_type_ = str(editing_type)
+        hairstyle_description_ = str(hairstyle_description)
+        # editing_type_ = str(editing_type).split(".")[-1]
+        # hairstyle_description_ = str(hairstyle_description).split(".")[-1]
+        # 判断是否正确输入
         if editing_type_ == "both":
             assert (
                 hairstyle_description_ is not None and color_description is not None
@@ -91,13 +79,15 @@ class Predictor(BasePredictor):
             assert (
                 color_description is not None
             ), "Please provide description for color."
-
-        opts = self.ckpt["opts"]
+        # opts是什么对象：为了和其他文件提供的opts接口匹配
+        opts = self.ckpt["opts"] #重要
         opts = Namespace(**opts)
+        # 将终端输入传入
         opts.editing_type = editing_type_
-        opts.input_type = "text"
+        opts.input_type = "text" # 好像用不上，保存没用上，判断也没用上
+        # 只针对了文本编辑，通过对opt的图片量传值扩展到图片
         opts.color_description = color_description
-
+        # 写入描述发型
         if hairstyle_description is not None:
             with open("hairstyle_description.txt", "w") as file:
                 file.write(hairstyle_description_)
@@ -111,29 +101,32 @@ class Predictor(BasePredictor):
         net = HairCLIPMapper(opts)
         net.eval()
         net.cuda()
-
+        # 结果保存路径
+        out_path = 'out.png'
+        # out_path = os.path.join(, 'out.png')
         # first align, resize image and get latent code
         input_image = run_alignment(str(image))
         resize_dims = (256, 256)
         input_image.resize(resize_dims)
         transformed_image = self.img_transforms(input_image)
-
+        # 编码
         with torch.no_grad():
 
             images, latents = run_on_batch_e4e(
                 transformed_image.unsqueeze(0), self.e4e_net
             )
             print("Latent code calculated!")
-
+        # 加载数据
         dataset = LatentsDatasetInference(latents=latents.cpu(), opts=opts)
         dataloader = DataLoader(dataset)
-
+        # 计算颜色损失
         average_color_loss = (
             average_lab_color_loss.AvgLabLoss(opts).to(self.device).eval()
         )
-
-        out_path = Path(tempfile.mkdtemp()) / "output.png"
-
+        # 设置路径
+        print('loading successfully!')
+        # out_path = Path(tempfile.mkdtemp()) / "output.png"
+        # 推理
         for input_batch in tqdm(dataloader):
 
             with torch.no_grad():
@@ -220,13 +213,14 @@ class Predictor(BasePredictor):
                             result_batch[0][0].unsqueeze(0),
                         ]
                     )
+                # 结果图
                 torchvision.utils.save_image(
                     couple_output, str(out_path), normalize=True, range=(-1, 1)
                 )
 
         return out_path
 
-
+# 人脸特征提取
 def run_alignment(image_path):
     predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
     aligned_image = align_face(filepath=image_path, predictor=predictor)
@@ -270,3 +264,9 @@ def run_on_batch(
         )
         result_batch = (x_hat, w_hat, x)
     return result_batch
+
+if __name__ == '__main__':
+    predict_opts = PredictOptions().parse()
+    per = Predictor()
+    per.predict(image=predict_opts.image, editing_type=predict_opts.editing_type, hairstyle_description=predict_opts.hairstyle_description,
+                color_description=predict_opts.color_description)
